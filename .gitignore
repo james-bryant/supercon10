@@ -1,0 +1,19 @@
+# Python / venv
+.venv/
+__pycache__/
+*.pyc
+
+# Local safety copies made by tools/dev.py (git history covers the code)
+backups/*
+!backups/.gitkeep
+
+# PyCharm per-user state
+.idea/workspace.xml
+.idea/shelf/
+.idea/copilot*
+.idea/usage.statistics.xml
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini

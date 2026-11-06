@@ -1,0 +1,3 @@
+# Host-side tools (these run on your PC, not on the ESP32)
+mpremote>=1.24,<2
+esptool>=5,<6
