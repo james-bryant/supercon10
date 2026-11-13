@@ -24,16 +24,16 @@ class GalleryApp(BaseApp):
         self.lastupdate = 0
     
     def random_art(self):
+        leds.fill((0, 1, 1))
         display.clear()
         display.draw_png(f'/data/gallery/' + "{:03d}".format(random.randint(1, self.maximage)) + '.png')
         display.update()
+        leds.fill((0, 1, 0))
     
     def run(self):
-        if self.launched:
+        if self.launched or UserA.pressed() or UserB.pressed():
             self.random_art()
             self.lastupdate = time.time()
-        else:
-            if time.time() > self.lastupdate + self.updatetime:
-                self.random_art()
-                self.lastupdate = time.time()
-            pass
+        elif time.time() > self.lastupdate + self.updatetime:
+            self.random_art()
+            self.lastupdate = time.time()

@@ -1,6 +1,12 @@
+import machine
 import micropython
 import time
 import asyncio as aio
+import lvgl
+
+# A display left over from before a soft reset points into the wiped heap
+if lvgl.display_get_default() is not None:
+    machine.reset()
 
 try:
     time.sleep(0.5)
@@ -9,6 +15,7 @@ try:
     from lib.button import scan as button_scan, UserA, UserB
     from lib.epd import display
     from lib.led_bar import leds
+    import lib.wifi as wifi
     import lib.json_configs as json_configs
     print("Importing apps...")
 except Exception as ex:
@@ -45,20 +52,32 @@ async def main():
     if configs['load_counter'] == 42:
         leds.fill((1,1,0))
         display.clear()
-        display.draw_png(f"/data/graphics/never-epd.png")
+        display.draw_png(f"/data/graphics/never_epd.png")
         display.update()
         leds.fill((0,1,0))
 
+    try:  # opt-in BLE presence advert; off (and BLE untouched) unless enabled
+        from lib import presence
+        presence.start()
+        aio.create_task(presence.keep_alive())
+    except Exception as ex:
+        print("presence:", ex)
+
     print("Initializing main...")
+    import lib.espnow_mesh as espnow_mesh  # ESP-NOW mesh, see lib/espnow_mesh.py
+    espnow_mesh.start()
+    import lib.mesh_mqtt as mesh_mqtt  # MQTT bridge, see lib/mesh_mqtt.py
+    mesh_mqtt.start()
 
     _button_task = aio.create_task(button_scan())
     _display_task = aio.create_task(display.run())
     _led_task = aio.create_task(leds.update())
     _apps_task = aio.create_task(switcher.arun())
+    _wifi_task = aio.create_task(wifi.keep_connected())
 
     print("Running main loop...")
     while True:
-        print("Main 60s heartbeat --^v--^v--")
+        print("Main 60s heartbeat --^v--^v--  wifi:", wifi.status())
         micropython.mem_info()
         await aio.sleep(60)
 
@@ -66,4 +85,11 @@ async def main():
 if __name__ == "__main__":
 
 
-    aio.run(main())
+    try:
+        aio.run(main())
+    finally:
+        # Must happen before the heap is wiped. deinit alone crashes.
+        _disp = lvgl.display_get_default()
+        if _disp:
+            _disp.delete()
+        lvgl.deinit()

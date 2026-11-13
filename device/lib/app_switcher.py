@@ -72,6 +72,20 @@ class AppSwitcher:
         apps_db.close()
         apps_file.close()
 
+        # Optional boot app: set "default_app" (an app name, e.g. "Nametag")
+        # in data/panel_config.json to skip the menu and launch it at boot.
+        try:
+            import lib.json_configs as json_configs
+            default_app = json_configs.load().get("default_app")
+        except Exception:
+            default_app = None
+        names = [app.name for app in self.apps]
+        if default_app in names:
+            self.active_idx = self.selection_idx = names.index(default_app)
+            self.apps[self.active_idx].launched = True
+            self.selecting_mode = False
+            print(f"Default app: {default_app}")
+
 
     async def arun(self):
         while True:

@@ -17,3 +17,8 @@ backups/*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Wi-Fi credentials (pushed to the badge, kept out of git)
+device/data/wifi.json
+# MQTT broker login (pushed to the bridge badges, kept out of git)
+device/data/mqtt.json

@@ -1,5 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="Device: push all + restart" type="PythonConfigurationType" factoryName="Python" folderName="Device">
+  <configuration default="false" name="Device: REPL" type="PythonConfigurationType" factoryName="Python" folderName="Device">
     <module name="supercon10" />
     <option name="ENV_FILES" value="" />
     <option name="INTERPRETER_OPTIONS" value="" />
@@ -9,12 +9,16 @@
       <env name="MPY_PORT" value="COM6" />
     </envs>
     <option name="SDK_HOME" value="" />
+    <option name="SDK_NAME" value="~\PycharmProjects\supercon10\.venv" />
     <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
     <option name="IS_MODULE_SDK" value="true" />
     <option name="ADD_CONTENT_ROOTS" value="true" />
     <option name="ADD_SOURCE_ROOTS" value="true" />
+    <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+    <option name="RUN_TOOL" value="" />
+    <option name="RUN_AS_SCRIPT" value="false" />
     <option name="SCRIPT_NAME" value="$PROJECT_DIR$/tools/dev.py" />
-    <option name="PARAMETERS" value="push --restart" />
+    <option name="PARAMETERS" value="repl" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="true" />
     <option name="MODULE_MODE" value="false" />

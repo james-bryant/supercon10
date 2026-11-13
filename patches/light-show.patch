@@ -1,0 +1,376 @@
+Light show for the ESP-NOW mesh (needs espnow-mesh.patch)
+
+Adds lib/mesh_sync.py, a clock the badges share over ESP-NOW, and
+apps/lights.py, a "Light show" app whose LEDs animate in step on every badge
+running it (patterns: rainbow, pulse, chase, flash, cylon; UserA and UserB
+change the pattern for the whole group). The badge picks up any app in apps/ by
+itself and the app starts the clock, so no existing file changes. Paths are
+relative to the badge's root folder, the one holding main.py.
+
+Made against Hack-a-Day/2026-Billboard_Badge at 5945518 (2026-11-08), where
+the badge's root folder is firmware/badge. It only adds files, so it applies
+to any version of the firmware.
+
+Apply from the folder holding main.py:
+    git apply light-show.patch
+    (or: patch -p1 < light-show.patch)
+Apply from a clone of github.com/Hack-a-Day/2026-Billboard_Badge:
+    git apply --directory=firmware/badge light-show.patch
+Apply from the supercon10 project root:
+    git apply --directory=device patches/light-show.patch
+Then copy lib/mesh_sync.py and apps/lights.py to the badge, together with the
+lib/espnow_mesh.py from espnow-mesh.patch: the light show needs its newest
+version.
+
+Files:
+    apps/lights.py       new file, 164 lines
+    lib/mesh_sync.py     new file, 172 lines
+
+diff --git a/apps/lights.py b/apps/lights.py
+new file mode 100644
+index 0000000..d47f17a
+--- /dev/null
++++ b/apps/lights.py
+@@ -0,0 +1,164 @@
++"""Light show app: badges running it animate their LEDs in step.
++
++The badges agree on a clock over ESP-NOW (lib/mesh_sync.py) and each works out
++its own LEDs from that clock, so they stay together without sending frames.
++UserA picks the next pattern and UserB the previous one; the choice spreads to
++the other badges within a second or two. The screen is drawn once when the app
++opens and then left alone, because redrawing it would stall the LEDs.
++"""
++
++import math
++import time
++
++import lvgl
++
++from apps.base_app import BaseApp
++from lib.button import UserA, UserB
++from lib.epd import display, display_height, display_width
++from lib.led_bar import NUM_LEDS, leds
++
++try:
++    import lib.mesh_sync as mesh_sync
++except Exception as ex:  # no (working) mesh on this badge: animate alone, but never block boot
++    print("lights: no shared clock -", repr(ex))
++    mesh_sync = None
++
++PATTERNS = ("rainbow", "pulse", "chase", "flash", "cylon")  # new ones go at the end
++BRIGHT = 24               # out of 255: these LEDs are bright (the menu uses 3)
++PAD = 16
++
++_WHITE = lvgl.color_hex(0xFFFFFF)
++_BLACK = lvgl.color_hex(0x000000)
++_BIG = getattr(lvgl, "font_montserrat_48", lvgl.font_montserrat_24)
++_MID = lvgl.font_montserrat_24
++
++
++def _hue(h):
++    """A rainbow colour at BRIGHT, for h in [0, 1)."""
++    h = (h % 1.0) * 6
++    k = int(h) % 6
++    up = int(BRIGHT * (h - int(h)))
++    down = BRIGHT - up
++    return ((BRIGHT, up, 0), (down, BRIGHT, 0), (0, BRIGHT, up),
++            (0, down, BRIGHT), (up, 0, BRIGHT), (BRIGHT, 0, down))[k]
++
++
++def _cylon(t):
++    """A red eye that sweeps from end to end and back every 2 s, with a fading tail."""
++    glow = [0.0] * NUM_LEDS
++    for lag, fade in ((0, 1.0), (100, 0.5), (200, 0.25), (300, 0.12)):  # the eye, then where it was
++        x = (t - lag) % 2000 / 1000             # 0 to 2: out, then back
++        eye = (x if x < 1 else 2 - x) * (NUM_LEDS - 1)
++        for i in range(NUM_LEDS):
++            level = (1 - abs(i - eye) / 1.5) * fade  # lights the LEDs within 1.5 of the eye
++            if level > glow[i]:
++                glow[i] = level
++    return [(int(BRIGHT * g), 0, 0) for g in glow]
++
++
++def frame(pattern, t):
++    """The colours of the LEDs for a pattern at shared time t (ms).
++
++    Every badge with the same t shows the same colours. Times are reduced with
++    integer % first: the badge's floats can't hold a big t to the ms.
++    """
++    if pattern == 0:  # rainbow: turns once every 4 s
++        base = (t % 4000) / 4000
++        return [_hue(base + i / NUM_LEDS) for i in range(NUM_LEDS)]
++    if pattern == 1:  # pulse: every badge breathes together, once every 2 s
++        level = (1 - math.cos(2 * math.pi * (t % 2000) / 2000)) / 2
++        return [(int(BRIGHT * level / 2), 0, int(BRIGHT * level))] * NUM_LEDS
++    if pattern == 2:  # chase: a dot runs along the bar, 80 ms per LED
++        step = t // 80 % NUM_LEDS
++        return [(0, BRIGHT, 0) if i == step else
++                (0, BRIGHT // 6, 0) if i == (step - 1) % NUM_LEDS else (0, 0, 0)
++                for i in range(NUM_LEDS)]
++    if pattern == 3:  # flash: a short white flash every second, the easiest way to see the sync
++        return [(BRIGHT, BRIGHT, BRIGHT) if t % 1000 < 60 else (0, 0, 0)] * NUM_LEDS
++    return _cylon(t)  # cylon: a red glow moving back and forth
++
++
++def _label(parent, font, text, width=0):
++    label = lvgl.label(parent)
++    label.remove_style_all()
++    label.set_style_text_font(font, 0)
++    label.set_style_text_color(_BLACK, 0)
++    if width:
++        label.set_width(width)  # fixed width, so long text wraps
++    label.set_text(text)
++    return label
++
++
++class LightShowApp(BaseApp):
++    def __init__(self, name=None):
++        super().__init__("Light show")
++        self.sleep_ms = 20   # about 40 frames a second
++        self._synced = False
++        self._pattern = 0    # used when there's no shared clock
++        self._scr = None
++
++    def run(self):
++        if self.launched:
++            self._join()
++            self._draw()
++        if UserA.pressed():
++            self._choose(1)
++        elif UserB.pressed():
++            self._choose(-1)
++        if self._synced:
++            t, p = mesh_sync.now(), mesh_sync.pattern()
++        else:
++            t, p = time.ticks_ms(), self._pattern
++        for i, colour in enumerate(frame(p % len(PATTERNS), t)):
++            leds[i] = colour  # then one write: newer LedBar.set() writes as well
++        leds.write()
++
++    def _join(self):
++        if mesh_sync is not None and not self._synced:
++            try:
++                self._synced = mesh_sync.start()
++            except Exception as ex:  # e.g. an older lib/espnow_mesh.py
++                print("lights: no shared clock -", repr(ex))
++
++    def _choose(self, step):
++        current = mesh_sync.pattern() if self._synced else self._pattern
++        n = (current + step) % len(PATTERNS)
++        if self._synced:
++            mesh_sync.set_pattern(n)
++        else:
++            self._pattern = n
++        print("lights:", PATTERNS[n])
++
++    def _draw(self):
++        if self._scr is None:
++            scr = lvgl.obj()
++            scr.remove_style_all()
++            scr.set_size(display_width, display_height)
++            scr.set_style_bg_color(_WHITE, 0)
++            scr.set_style_bg_opa(lvgl.OPA.COVER, 0)
++            _label(scr, _BIG, "Light show").set_pos(PAD, PAD)
++            box = lvgl.obj(scr)  # lines stack top down, wrapping as needed
++            box.remove_style_all()
++            box.set_pos(PAD, 100)
++            box.set_size(display_width - 2 * PAD, display_height - 100 - PAD)
++            box.set_flex_flow(lvgl.FLEX_FLOW.COLUMN)
++            box.set_style_pad_row(18, 0)
++            width = display_width - 2 * PAD
++            if self._synced:
++                _label(box, _MID, "Badges running this app light up together, on a clock "
++                                  "they share over ESP-NOW. Changing the pattern changes it "
++                                  "on every badge in the show.", width)
++            else:
++                _label(box, _MID, "No mesh on this badge, so it animates on its own.", width)
++            _label(box, _MID, "UserA: next pattern      UserB: previous pattern", width)
++            _label(box, _MID, "Patterns: " + ", ".join(PATTERNS), width)
++            self._scr = scr
++        display.clear()
++        lvgl.screen_load(self._scr)
++        self._scr.invalidate()  # draw all of it, even if LVGL thinks it's on screen
++        self._scr.update_layout()
++        lvgl.refr_now(display.lv_display)
++        try:
++            display.update(slow=True)  # one full refresh: solid black text, nothing left behind
++        except TypeError:
++            display.update()  # the original driver: always a full refresh
+diff --git a/lib/mesh_sync.py b/lib/mesh_sync.py
+new file mode 100644
+index 0000000..49e23d6
+--- /dev/null
++++ b/lib/mesh_sync.py
+@@ -0,0 +1,172 @@
++"""Shared clock over the ESP-NOW mesh, so badges can animate in step.
++
++Each badge that joins (the Light show app does) broadcasts a small SYNC packet
++to its radio neighbours every SYNC_MS. It goes out with ttl 0, so nobody relays
++it and no bridge carries it: MQTT is far too slow for timing.
++
++The badge with the lowest MAC leads, and its clock is the shared clock. The
++leader numbers its SYNC packets; a badge takes the time from whichever
++neighbour first brings it a newer number, then passes that time on in its own
++SYNC packets, so the clock spreads hop by hop with a millisecond or two of error
++per hop. Arrival times come from the radio driver, so a badge that is busy
++(drawing its screen, say) reads packets late but still times them right. Small
++corrections are eased in; a badge joining a group jumps straight to its clock.
++If no newer number arrives for ROOT_TIMEOUT_MS the leader is gone, and the next
++lowest MAC takes over without the clock jumping. Badges then ignore the old
++leader's last packets still echoing around, unless it really comes back. When
++two shows meet, the one whose leader has the lower MAC wins, pattern included.
++
++The group also agrees on a light pattern: whoever changed it most recently, by
++the shared clock, wins, and the choice spreads the same way.
++
++    now()            the shared clock in ms (wraps at 2**32)
++    pattern()        the group's pattern number
++    set_pattern(n)   choose the pattern for the whole group
++    status()         "leading" or "following aa:bb:cc, 2 hops"
++"""
++
++import asyncio as aio
++import binascii
++import os
++import struct
++import time
++
++import network
++
++import lib.espnow_mesh as mesh
++
++SYNC = 3                  # mesh packet type
++SYNC_MS = 2000            # how often each badge tells its neighbours the time
++ROOT_TIMEOUT_MS = 9000    # no newer leader packet for this long: the leader is gone
++JUMP_MS = 100             # clock differences beyond this jump; smaller ones are eased in
++LATENCY_MS = 1            # from stamping a SYNC packet to the neighbour's radio receiving it
++
++# leader MAC, leader's packet number, hops from the leader, time, pattern, when it was chosen
++_SYNC = ">6sHBIBI"        # (MicroPython's struct has no Struct class)
++_SYNC_LEN = struct.calcsize(_SYNC)
++_WRAP = 0xFFFFFFFF
++
++_me = b""
++_root = b""               # the leader this badge follows; itself while leading
++_root_seq = int.from_bytes(os.urandom(2), "big")
++_depth = 0                # hops from the leader
++_offset = 0               # shared clock = local clock + _offset, mod 2**32
++_heard = 0                # local ms when the leader's clock last reached this badge
++_pattern = 0
++_chosen = 0               # shared ms when the pattern was chosen
++_announce_at = 0          # local ms of the next SYNC packet
++_gone = {}                # leaders that went quiet: MAC -> (last packet number, ignore until)
++_started = False
++_local_ms = 0             # local clock: ticks_ms without the wrap
++_last_tick = time.ticks_ms()
++
++
++def _local():
++    global _local_ms, _last_tick
++    t = time.ticks_ms()
++    _local_ms += time.ticks_diff(t, _last_tick)
++    _last_tick = t
++    return _local_ms
++
++
++def _diff(a, b):
++    """a - b for times that wrap at 2**32, as a signed number."""
++    return ((a - b + 0x80000000) & _WRAP) - 0x80000000
++
++
++def _short(mac):
++    return binascii.hexlify(mac[3:], ":").decode()
++
++
++def now():
++    """The shared clock, in ms."""
++    return (_local() + _offset) & _WRAP
++
++
++def pattern():
++    return _pattern
++
++
++def set_pattern(n):
++    """Choose the pattern for the whole group; the neighbours hear right away."""
++    global _pattern, _chosen, _announce_at
++    _pattern, _chosen, _announce_at = n & 0xFF, now(), _local()
++
++
++def status():
++    if _root == _me:
++        return "leading"
++    return "following %s, %d hop%s" % (_short(_root), _depth, "" if _depth == 1 else "s")
++
++
++def _on_packet(ptype, origin, seq, hops, payload):
++    """Mesh listener: take the time and the pattern from a neighbour's SYNC packet."""
++    global _root, _root_seq, _depth, _offset, _heard, _pattern, _chosen, _announce_at
++    # Only SYNC packets straight from a radio neighbour carry usable timing.
++    if ptype != SYNC or hops or not isinstance(mesh.rx_from, bytes) or len(payload) != _SYNC_LEN:
++        return
++    root, root_seq, depth, their_time, their_pattern, chosen = struct.unpack(_SYNC, payload)
++    lt = _local()
++    arrival = lt - time.ticks_diff(_last_tick, mesh.rx_time)  # on the local clock
++    offset = (their_time + LATENCY_MS - arrival) & _WRAP
++    newer = 0 < ((root_seq - _root_seq) & 0xFFFF) < 0x8000
++    gone = _gone.get(root)
++    if gone and (lt > gone[1] or 0 < ((root_seq - gone[0]) & 0xFFFF) < 0x8000):
++        del _gone[root]  # long enough ago, or newer packets: it's really back
++        gone = None
++    if (root < _root and not gone) or (root == _root and root != _me and newer):
++        joined = root != _root
++        _root, _root_seq, _depth, _heard = root, root_seq, min(depth + 1, 255), lt
++        step = _diff(offset, _offset)
++        if abs(step) > JUMP_MS:
++            _offset = offset
++            _pattern, _chosen = their_pattern, chosen  # a different clock: take the group's pattern too
++        else:
++            _offset = (_offset + step // 2) & _WRAP    # ease small corrections in
++        if joined:
++            print("sync:", status())
++            _announce_at = min(_announce_at, lt + 20 + os.urandom(1)[0] % 100)  # spread the news
++    if root == _root and _diff(chosen, _chosen) > 0:
++        _pattern, _chosen = their_pattern, chosen
++        _announce_at = min(_announce_at, lt + 20 + os.urandom(1)[0] % 100)  # pass it on soon
++
++
++def _announce():
++    global _root_seq
++    if _root == _me:
++        _root_seq = (_root_seq + 1) & 0xFFFF
++    mesh.send(struct.pack(_SYNC, _root, _root_seq, _depth, now(), _pattern, _chosen), SYNC, ttl=0)
++
++
++async def _loop():
++    global _root, _depth, _announce_at
++    while True:
++        lt = _local()
++        if _root != _me and lt - _heard > ROOT_TIMEOUT_MS:
++            # Don't let the old leader's last packets, still echoing around, win it back.
++            _gone[_root] = (_root_seq, lt + 2 * ROOT_TIMEOUT_MS)
++            _root, _depth = _me, 0  # keep the offset, so the clock carries on smoothly
++            _announce_at = lt
++            print("sync: leading (the previous leader went quiet)")
++        for mac in [m for m, (_, until) in _gone.items() if lt > until]:
++            del _gone[mac]
++        if lt >= _announce_at:
++            _announce()
++            _announce_at = lt + SYNC_MS + os.urandom(1)[0] % 200  # jitter keeps badges apart
++        await aio.sleep_ms(50)
++
++
++def start():
++    """Join the shared clock. False if ESP-NOW isn't available."""
++    global _started, _me, _root
++    if _started:
++        return True
++    if not mesh.start():
++        return False
++    _me = _root = network.WLAN(network.STA_IF).config("mac")
++    mesh.quiet.add(SYNC)
++    mesh.listeners.append(_on_packet)
++    aio.create_task(_loop())
++    _started = True
++    print("sync: joined, leading until a lower MAC is heard")
++    return True

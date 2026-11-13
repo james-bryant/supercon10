@@ -2,6 +2,9 @@
 <project version="4">
   <component name="MicroPythonTools">
     <option name="activeWebReplPresetId" value="b6cf160e-9e9a-4f7c-aa30-24d85dbaa30d" />
+    <option name="pluginEnabled" value="true" />
+    <option name="portName" value="COM6" />
+    <option name="shouldAutoDetect" value="false" />
     <option name="webReplPresets">
       <map>
         <entry key="b6cf160e-9e9a-4f7c-aa30-24d85dbaa30d" value="{&quot;id&quot;:&quot;b6cf160e-9e9a-4f7c-aa30-24d85dbaa30d&quot;,&quot;name&quot;:&quot;Default&quot;}" />

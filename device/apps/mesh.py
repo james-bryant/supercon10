@@ -1,0 +1,200 @@
+"""Mesh app: what the ESP-NOW mesh (lib/espnow_mesh.py) is hearing.
+
+Shows how many nodes this badge heard in the last minute and the latest text
+messages, newest first. The last LED blinks for every new packet while the app
+is open. Messages are collected from boot, so they are already there when the
+app opens. The screen is redrawn only when the node count or the messages
+change, and at most every REDRAW_MS. Opening the app does one full refresh, so
+text is solid black and nothing from the last app shows through; updates redraw
+just the part that changed with two quick passes, and a full refresh clears any
+ghosting at most every FULL_REFRESH_MS.
+"""
+
+import binascii
+import time
+
+import lvgl
+import network
+
+from apps.base_app import BaseApp
+from lib.epd import display, display_height, display_width
+from lib.led_bar import NUM_LEDS, leds
+
+try:
+    import lib.espnow_mesh as espnow_mesh
+except Exception as ex:  # no (working) mesh: show a note, but never block boot
+    print("mesh app: no mesh -", repr(ex))
+    espnow_mesh = None
+
+MAX_MESSAGES = 8
+REDRAW_MS = 10000          # at most one screen refresh this often
+BLINK_MS = 80
+BLINK_COLOR = (0, 0, 3)    # dim blue, as bright as the menu LEDs
+FULL_REFRESH_MS = 600000   # at most one full (slow) refresh every 10 minutes
+PAD = 16
+HEADER_END = 104           # the node count and badge line sit above this row
+LIST_TOP = 160             # the messages start at this row
+
+_WHITE = lvgl.color_hex(0xFFFFFF)
+_BLACK = lvgl.color_hex(0x000000)
+_BIG = getattr(lvgl, "font_montserrat_48", lvgl.font_montserrat_24)
+_MID = lvgl.font_montserrat_24  # 16 px strokes come out too thin on this panel
+
+
+def _short(mac):
+    """The last three bytes of a MAC, enough to tell badges apart."""
+    return binascii.hexlify(mac[3:], ":").decode()
+
+
+def _badge_line():
+    wlan = network.WLAN(network.STA_IF)
+    text = "this badge " + _short(wlan.config("mac"))
+    try:
+        return text + ", channel %d" % wlan.config("channel")
+    except Exception:  # radio off
+        return text
+
+
+def _label(parent, font, width=0):
+    label = lvgl.label(parent)
+    label.remove_style_all()
+    label.set_style_text_font(font, 0)
+    label.set_style_text_color(_BLACK, 0)
+    if width:
+        label.set_width(width)  # fixed width, so long text wraps
+    return label
+
+
+def _refresh(full=False, y_start=0, y_end=display_height):
+    try:
+        if full:
+            # The factory waveform: solid black text, and no red or ghost image
+            # left over from the previous screen.
+            display.update(slow=True)
+        else:
+            # Two quick passes over every pixel in the band. A single pass only
+            # touches changed pixels and leaves an outline of the old text.
+            display.update(y_start=y_start, y_end=y_end, fast_passes=2)
+    except TypeError:
+        display.update()  # the original driver: always one full refresh
+
+
+class MeshApp(BaseApp):
+    def __init__(self, name=None):
+        super().__init__("Mesh")
+        self.sleep_ms = 50  # often enough for a crisp blink
+        self._messages = []  # "aa:bb:cc:  text", newest first
+        self._version = 0    # goes up with every new message
+        self._packets = 0    # new packets heard since boot
+        self._blinked = 0
+        self._led_off = None
+        self._scr = None
+        self._shown = None   # (node count, badge line, message version) on the screen
+        self._drawn_at = self._full_at = time.ticks_ms()
+        if espnow_mesh is not None:
+            espnow_mesh.listeners.append(self._on_packet)
+
+    def _on_packet(self, ptype, origin, seq, hops, payload):
+        """Mesh listener: runs for every new packet, even while the app is closed."""
+        self._packets += 1
+        if ptype == espnow_mesh.TEXT:
+            try:
+                text = payload.decode()
+            except UnicodeError:
+                text = repr(payload)
+            self._messages.insert(0, "%s:  %s" % (_short(origin), text))
+            del self._messages[MAX_MESSAGES:]
+            self._version += 1
+
+    def _content(self):
+        return (espnow_mesh.node_count() if espnow_mesh else 0), self._version
+
+    def run(self):
+        now = time.ticks_ms()
+        if self.launched:
+            leds.fill((0, 0, 0))
+            self._blinked = self._packets  # no blink for packets from before
+            self._draw(now, launch=True)
+            return
+        self._blink(now)
+        changed = self._shown is None or self._content() != (self._shown[0], self._shown[2])
+        if changed and display.is_done_updating() and time.ticks_diff(now, self._drawn_at) >= REDRAW_MS:
+            self._draw(now)
+
+    def _blink(self, now):
+        """Flash the last LED for each new packet."""
+        if self._packets != self._blinked:
+            self._blinked = self._packets
+            leds[NUM_LEDS - 1] = BLINK_COLOR
+            leds.write()
+            self._led_off = time.ticks_add(now, BLINK_MS)
+        elif self._led_off is not None and time.ticks_diff(now, self._led_off) >= 0:
+            leds[NUM_LEDS - 1] = (0, 0, 0)
+            leds.write()
+            self._led_off = None
+
+    def _build(self):
+        scr = lvgl.obj()
+        scr.remove_style_all()
+        scr.set_size(display_width, display_height)
+        scr.set_style_bg_color(_WHITE, 0)
+        scr.set_style_bg_opa(lvgl.OPA.COVER, 0)
+        title = _label(scr, _MID)
+        title.set_pos(PAD, PAD)
+        title.set_text("ESP-NOW mesh")
+        self._badge = _label(scr, _MID)
+        self._badge.set_pos(PAD, 50)
+        self._count = _label(scr, _BIG)
+        self._count.align(lvgl.ALIGN.TOP_RIGHT, -PAD, PAD - 6)
+        self._caption = _label(scr, _MID)
+        self._caption.align(lvgl.ALIGN.TOP_RIGHT, -PAD, 70)
+        rule = lvgl.obj(scr)
+        rule.remove_style_all()
+        rule.set_pos(PAD, 110)
+        rule.set_size(display_width - 2 * PAD, 3)
+        rule.set_style_bg_color(_BLACK, 0)
+        rule.set_style_bg_opa(lvgl.OPA.COVER, 0)
+        heading = _label(scr, _MID)
+        heading.set_pos(PAD, 122)
+        heading.set_text("Latest messages")
+        box = lvgl.obj(scr)  # messages stack top down; ones that don't fit are cut off
+        box.remove_style_all()
+        box.set_pos(PAD, LIST_TOP)
+        box.set_size(display_width - 2 * PAD, display_height - LIST_TOP - PAD)
+        box.set_flex_flow(lvgl.FLEX_FLOW.COLUMN)
+        box.set_style_pad_row(14, 0)
+        self._rows = [_label(box, _MID, display_width - 2 * PAD) for _ in range(MAX_MESSAGES)]
+        self._scr = scr
+
+    def _draw(self, now, launch=False):
+        if self._scr is None:
+            self._build()
+        count, version = self._content()
+        badge = _badge_line()
+        old = self._shown or (None, None, None)
+        header_changed = launch or (count, badge) != old[:2]
+        list_changed = launch or version != old[2]
+        self._badge.set_text(badge)
+        self._count.set_text("%d node%s" % (count, "" if count == 1 else "s"))
+        if espnow_mesh is None:
+            self._caption.set_text("")
+            texts = ["The mesh isn't installed (lib/espnow_mesh.py)."]
+        else:
+            self._caption.set_text("heard in the last %d s" % espnow_mesh.FORGET_S)
+            texts = self._messages or ["No messages yet."]
+        for row, text in zip(self._rows, texts + [""] * MAX_MESSAGES):
+            row.set_text(text)
+        if launch:
+            display.clear()
+            lvgl.screen_load(self._scr)
+            self._scr.invalidate()  # draw all of it, even if LVGL thinks it's on screen
+        self._scr.update_layout()
+        lvgl.refr_now(display.lv_display)
+        if launch or time.ticks_diff(now, self._full_at) >= FULL_REFRESH_MS:
+            _refresh(full=True)
+            self._full_at = now
+        else:
+            _refresh(y_start=0 if header_changed else LIST_TOP,
+                     y_end=display_height if list_changed else HEADER_END)
+        self._shown = (count, badge, version)
+        self._drawn_at = now

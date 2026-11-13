@@ -1,0 +1,11 @@
+{
+  "mode": "built-in image_gen, one edit per original design",
+  "date": "2026-11-06",
+  "source_files": ["name-v1-bw-source.png", "name-v2-bw-source.png", "name-v3-bw-source.png"],
+  "device_files": ["../../badge/data/graphics/nametag_band_v1.png", "../../badge/data/graphics/nametag_band_v2.png", "../../badge/data/graphics/nametag_band_v3.png"],
+  "prompt_template": "Edit this existing nametag asset into a pure black-and-white version for a monochrome e-ink display. Preserve exact text \"Jeff BigTaro\", the distinctive lettering of this particular design, overall layout, clean white background, wide 20:7 aspect ratio, and generous outer margins. No red, gray, gradients, halftone, shadows in gray, texture, mockup, or extra text. Use only solid #000000 black and #FFFFFF white. Change red decorative circuit lines and exterior accents to black; where red details sit inside black lettering, use crisp white cutouts so the details remain visible. Keep lettering readable and all artwork inside the canvas. This is design {n} of three; preserve this specific reference design rather than inventing a different logo. Output 960 by 336 pixels if supported.",
+  "prompt_design_values": [1, 2, 3],
+  "build_command": "./tools/build_nametag_monochrome.ps1",
+  "device_format": "960x336, 1-bit grayscale PNG, no dithering; resized and thresholded by the build script",
+  "original_color_backups": "../../.work/white_cleanup/color-assets"
+}

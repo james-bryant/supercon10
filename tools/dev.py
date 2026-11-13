@@ -33,7 +33,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEVICE_DIR = ROOT / "device"
 BACKUP_DIR = ROOT / "backups"
-DEFAULT_PORT = os.environ.get("MPY_PORT", "COM6")
+DEFAULT_PORT = os.environ.get("MPY_PORT", "COM10")
 
 # Never pushed to the board (any path component starting with "." is skipped too).
 PUSH_IGNORE_NAMES = {"__pycache__", "Thumbs.db", "desktop.ini"}
